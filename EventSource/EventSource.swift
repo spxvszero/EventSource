@@ -14,6 +14,25 @@ public enum EventSourceState {
     case closed
 }
 
+public struct EventSourceRequest {
+    enum HTTPMethod : String {
+        case get = "GET"
+        case post = "POST"
+    }
+    
+    var url : String
+    var method : HTTPMethod
+    var body : Data?
+    
+    func request() -> URLRequest {
+        var req = URLRequest.init(url: URL.init(string: url)!)
+        req.httpMethod = self.method.rawValue
+        req.httpBody = body
+        req.addValue("application/json", forHTTPHeaderField: "Content-Type")
+        return req
+    }
+}
+
 public protocol EventSourceProtocol {
     var headers: [String: String] { get }
 
@@ -21,7 +40,7 @@ public protocol EventSourceProtocol {
     var retryTime: Int { get }
 
     /// URL where EventSource will listen for events.
-    var url: URL { get }
+    var url: EventSourceRequest { set get }
 
     /// The last event id received from server. This id is neccesary to keep track of the last event-id received to avoid
     /// receiving duplicate events after a reconnection.
@@ -46,7 +65,7 @@ public protocol EventSourceProtocol {
     /// Callback called when EventSource has successfully connected to the server.
     ///
     /// - Parameter onOpenCallback: callback
-    func onOpen(_ onOpenCallback: @escaping (() -> Void))
+    func onOpen(_ onOpenCallback: ((_ localId : Int) -> Void)?)
 
     /// Callback called once EventSource has disconnected from server. This can happen for multiple reasons.
     /// The server could have requested the disconnection or maybe a network layer error, wrong URL or any other
@@ -54,10 +73,10 @@ public protocol EventSourceProtocol {
     /// following event source rules and finally the network layer error if any. All this information is more than
     /// enought for you to take a decition if you should reconnect or not.
     /// - Parameter onOpenCallback: callback
-    func onComplete(_ onComplete: @escaping ((Int?, Bool?, NSError?) -> Void))
+    func onComplete(_ onComplete: ((_ localId : Int, Int?, Bool?, NSError?) -> Void)?)
 
     /// This callback is called everytime an event with name "message" or no name is received.
-    func onMessage(_ onMessageCallback: @escaping ((_ id: String?, _ event: String?, _ data: String?) -> Void))
+    func onMessage(_ onMessageCallback: ((_ localId : Int, _ id: String?, _ event: String?, _ data: String?) -> Void)?)
 
     /// Add an event handler for an specific event name.
     ///
@@ -65,7 +84,7 @@ public protocol EventSourceProtocol {
     ///   - event: name of the event to receive
     ///   - handler: this handler will be called everytime an event is received with this event-name
     func addEventListener(_ event: String,
-                          handler: @escaping ((_ id: String?, _ event: String?, _ data: String?) -> Void))
+                          handler: @escaping ((_ localId : Int, _ id: String?, _ event: String?, _ data: String?) -> Void))
 
     /// Remove an event handler for the event-name
     ///
@@ -76,16 +95,16 @@ public protocol EventSourceProtocol {
 open class EventSource: NSObject, EventSourceProtocol, URLSessionDataDelegate {
     static let DefaultRetryTime = 3000
 
-    public let url: URL
+    public var url: EventSourceRequest
     private(set) public var lastEventId: String?
     private(set) public var retryTime = EventSource.DefaultRetryTime
     private(set) public var headers: [String: String]
     private(set) public var readyState: EventSourceState
 
-    private var onOpenCallback: (() -> Void)?
-    private var onComplete: ((Int?, Bool?, NSError?) -> Void)?
-    private var onMessageCallback: ((_ id: String?, _ event: String?, _ data: String?) -> Void)?
-    private var eventListeners: [String: (_ id: String?, _ event: String?, _ data: String?) -> Void] = [:]
+    private var onOpenCallback: ((_ localId : Int) -> Void)?
+    private var onComplete: ((_ localId : Int, Int?, Bool?, NSError?) -> Void)?
+    private var onMessageCallback: ((_ localId : Int, _ id: String?, _ event: String?, _ data: String?) -> Void)?
+    private var eventListeners: [String: (_ localId : Int, _ id: String?, _ event: String?, _ data: String?) -> Void] = [:]
 
     private var eventStreamParser: EventStreamParser?
     private var operationQueue: OperationQueue
@@ -93,7 +112,7 @@ open class EventSource: NSObject, EventSourceProtocol, URLSessionDataDelegate {
     private var urlSession: URLSession?
 
     public init(
-        url: URL,
+        url: EventSourceRequest,
         headers: [String: String] = [:]
     ) {
         self.url = url
@@ -110,9 +129,13 @@ open class EventSource: NSObject, EventSourceProtocol, URLSessionDataDelegate {
         eventStreamParser = EventStreamParser()
         readyState = .connecting
 
-        let configuration = sessionConfiguration(lastEventId: lastEventId)
-        urlSession = URLSession(configuration: configuration, delegate: self, delegateQueue: operationQueue)
-        urlSession?.dataTask(with: url).resume()
+        self.headers["Last-Event-Id"] = lastEventId
+        if let session = urlSession {
+        }else {
+            let configuration = sessionConfiguration(lastEventId: lastEventId)
+            urlSession = URLSession(configuration: configuration, delegate: self, delegateQueue: operationQueue)
+        }
+        urlSession?.dataTask(with: url.request()).resume()
     }
 
     public func disconnect() {
@@ -120,20 +143,20 @@ open class EventSource: NSObject, EventSourceProtocol, URLSessionDataDelegate {
         urlSession?.invalidateAndCancel()
     }
 
-    public func onOpen(_ onOpenCallback: @escaping (() -> Void)) {
+    public func onOpen(_ onOpenCallback: ((_ localId : Int) -> Void)?) {
         self.onOpenCallback = onOpenCallback
     }
 
-    public func onComplete(_ onComplete: @escaping ((Int?, Bool?, NSError?) -> Void)) {
+    public func onComplete(_ onComplete: ((_ localId : Int, Int?, Bool?, NSError?) -> Void)?) {
         self.onComplete = onComplete
     }
 
-    public func onMessage(_ onMessageCallback: @escaping ((_ id: String?, _ event: String?, _ data: String?) -> Void)) {
+    public func onMessage(_ onMessageCallback: ((_ localId : Int, _ id: String?, _ event: String?, _ data: String?) -> Void)?) {
         self.onMessageCallback = onMessageCallback
     }
 
     public func addEventListener(_ event: String,
-                                 handler: @escaping ((_ id: String?, _ event: String?, _ data: String?) -> Void)) {
+                                 handler: @escaping ((_ localId : Int, _ id: String?, _ event: String?, _ data: String?) -> Void)) {
         eventListeners[event] = handler
     }
 
@@ -152,7 +175,7 @@ open class EventSource: NSObject, EventSourceProtocol, URLSessionDataDelegate {
         }
 
         if let events = eventStreamParser?.append(data: data) {
-            notifyReceivedEvents(events)
+            notifyReceivedEvents(dataTask.taskIdentifier, events)
         }
     }
 
@@ -164,7 +187,7 @@ open class EventSource: NSObject, EventSourceProtocol, URLSessionDataDelegate {
         completionHandler(URLSession.ResponseDisposition.allow)
 
         readyState = .open
-        mainQueue.async { [weak self] in self?.onOpenCallback?() }
+        mainQueue.async { [weak self] in self?.onOpenCallback?(dataTask.taskIdentifier) }
     }
 
     open func urlSession(_ session: URLSession,
@@ -172,12 +195,12 @@ open class EventSource: NSObject, EventSourceProtocol, URLSessionDataDelegate {
                          didCompleteWithError error: Error?) {
 
         guard let responseStatusCode = (task.response as? HTTPURLResponse)?.statusCode else {
-            mainQueue.async { [weak self] in self?.onComplete?(nil, nil, error as NSError?) }
+            mainQueue.async { [weak self] in self?.onComplete?(task.taskIdentifier, nil, nil, error as NSError?) }
             return
         }
 
         let reconnect = shouldReconnect(statusCode: responseStatusCode)
-        mainQueue.async { [weak self] in self?.onComplete?(responseStatusCode, reconnect, nil) }
+        mainQueue.async { [weak self] in self?.onComplete?(task.taskIdentifier, responseStatusCode, reconnect, nil) }
     }
 
     open func urlSession(_ session: URLSession,
@@ -189,6 +212,10 @@ open class EventSource: NSObject, EventSourceProtocol, URLSessionDataDelegate {
         var newRequest = request
         self.headers.forEach { newRequest.setValue($1, forHTTPHeaderField: $0) }
         completionHandler(newRequest)
+    }
+    
+    deinit {
+        print("remove event source")
     }
 }
 
@@ -219,7 +246,7 @@ internal extension EventSource {
 
 private extension EventSource {
 
-    func notifyReceivedEvents(_ events: [Event]) {
+    func notifyReceivedEvents(_ localId : Int, _ events: [Event]) {
 
         for event in events {
             lastEventId = event.id
@@ -230,11 +257,11 @@ private extension EventSource {
             }
 
             if event.event == nil || event.event == "message" {
-                mainQueue.async { [weak self] in self?.onMessageCallback?(event.id, "message", event.data) }
+                mainQueue.async { [weak self] in self?.onMessageCallback?(localId, event.id, "message", event.data) }
             }
 
             if let eventName = event.event, let eventHandler = eventListeners[eventName] {
-                mainQueue.async { eventHandler(event.id, event.event, event.data) }
+                mainQueue.async { eventHandler(localId, event.id, event.event, event.data) }
             }
         }
     }

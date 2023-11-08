@@ -19,15 +19,15 @@ class ViewController: UIViewController {
     override func viewDidLoad() {
         super.viewDidLoad()
 
-        let serverURL = URL(string: "http://127.0.0.1:8080/sse")!
+        let serverURL = EventSourceRequest(url: "http://127.0.0.1:8080/sse", method: .get)
         eventSource = EventSource(url: serverURL, headers: ["Authorization": "Bearer basic-auth-token"])
 
-        eventSource?.onOpen { [weak self] in
+        eventSource?.onOpen {  [weak self] localId in
             self?.status.backgroundColor = UIColor(red: 166/255, green: 226/255, blue: 46/255, alpha: 1)
             self?.status.text = "CONNECTED"
         }
 
-        eventSource?.onComplete { [weak self] statusCode, reconnect, error in
+        eventSource?.onComplete { [weak self] localId, statusCode, reconnect, error in
             self?.status.backgroundColor = UIColor(red: 249/255, green: 38/255, blue: 114/255, alpha: 1)
             self?.status.text = "DISCONNECTED"
 
@@ -39,11 +39,11 @@ class ViewController: UIViewController {
             }
         }
 
-        eventSource?.onMessage { [weak self] id, event, data in
+        eventSource?.onMessage { [weak self]  localId, id, event, data in
             self?.updateLabels(id, event: event, data: data)
         }
 
-        eventSource?.addEventListener("user-connected") { [weak self] id, event, data in
+        eventSource?.addEventListener("user-connected") { [weak self] localId, id, event, data in
             self?.updateLabels(id, event: event, data: data)
         }
     }
